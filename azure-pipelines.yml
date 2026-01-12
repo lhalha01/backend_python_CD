@@ -13,55 +13,96 @@ pool:
 
 variables:
   pythonVersion: '3.11'
+
+  # Artifacts
   artifactName: 'backend-python'
+  packageFileName: 'app.zip'
 
-steps:
-  - checkout: self
-    fetchDepth: 1
+  # Deployment (configúralo en tu Pipeline variables o Variable Group)
+  azureServiceConnection: ''
+  webAppName: ''
+  environmentName: 'prod'
 
-  - task: UsePythonVersion@0
-    displayName: 'Use Python $(pythonVersion)'
-    inputs:
-      versionSpec: '$(pythonVersion)'
-      addToPath: true
+stages:
+  - stage: Build
+    displayName: 'Build'
+    jobs:
+      - job: Build
+        displayName: 'Build & Package'
+        steps:
+          - checkout: self
+            fetchDepth: 1
 
-  - task: Cache@2
-    displayName: 'Cache pip'
-    inputs:
-      key: 'pip | "$(Agent.OS)" | requirements.txt'
-      restoreKeys: |
-        pip | "$(Agent.OS)"
-      path: $(Pipeline.Workspace)/.pip
+          - task: UsePythonVersion@0
+            displayName: 'Use Python $(pythonVersion)'
+            inputs:
+              versionSpec: '$(pythonVersion)'
+              addToPath: true
 
-  - script: |
-      python -m pip install --upgrade pip
-      python -m pip install --cache-dir $(Pipeline.Workspace)/.pip -r requirements.txt
-    displayName: 'Install dependencies'
+          - task: Cache@2
+            displayName: 'Cache pip'
+            inputs:
+              key: 'pip | "$(Agent.OS)" | requirements.txt'
+              restoreKeys: |
+                pip | "$(Agent.OS)"
+              path: $(Pipeline.Workspace)/.pip
 
-  - script: |
-      python -m compileall -q app.py
-      python -c "import app; print(app.app.title)"
-    displayName: 'Validate syntax & imports'
+          - script: |
+              python -m pip install --upgrade pip
+              python -m pip install --cache-dir $(Pipeline.Workspace)/.pip -r requirements.txt
+            displayName: 'Install dependencies'
 
-  # Si más adelante añades tests con pytest, descomenta esto:
-  # - script: |
-  #     python -m pip install --cache-dir $(Pipeline.Workspace)/.pip pytest
-  #     pytest -q
-  #   displayName: 'Run tests'
+          - script: |
+              python -m compileall -q app.py
+              python -c "import app; print(app.app.title)"
+            displayName: 'Validate syntax & imports'
 
-  - task: CopyFiles@2
-    displayName: 'Stage sources'
-    inputs:
-      SourceFolder: '$(Build.SourcesDirectory)'
-      Contents: |
-        **/*
-        !**/__pycache__/**
-        !**/*.pyc
-        !**/.git/**
-      TargetFolder: '$(Build.ArtifactStagingDirectory)'
+          # Empaquetado para Zip Deploy (App Service)
+          - task: CopyFiles@2
+            displayName: 'Stage sources'
+            inputs:
+              SourceFolder: '$(Build.SourcesDirectory)'
+              Contents: |
+                **/*
+                !**/__pycache__/**
+                !**/*.pyc
+                !**/.git/**
+              TargetFolder: '$(Build.ArtifactStagingDirectory)/src'
 
-  - task: PublishBuildArtifacts@1
-    displayName: 'Publish artifact'
-    inputs:
-      PathtoPublish: '$(Build.ArtifactStagingDirectory)'
-      ArtifactName: '$(artifactName)'
+          - task: ArchiveFiles@2
+            displayName: 'Create deployment package'
+            inputs:
+              rootFolderOrFile: '$(Build.ArtifactStagingDirectory)/src'
+              includeRootFolder: false
+              archiveType: 'zip'
+              archiveFile: '$(Build.ArtifactStagingDirectory)/$(packageFileName)'
+              replaceExistingArchive: true
+
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publish artifact'
+            inputs:
+              PathtoPublish: '$(Build.ArtifactStagingDirectory)/$(packageFileName)'
+              ArtifactName: '$(artifactName)'
+
+  - stage: Deploy
+    displayName: 'Deploy'
+    dependsOn: Build
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'), ne(variables['Build.Reason'], 'PullRequest'))
+    jobs:
+      - deployment: DeployWebApp
+        displayName: 'Deploy to Azure App Service'
+        environment: '$(environmentName)'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - download: current
+                  artifact: '$(artifactName)'
+
+                - task: AzureWebApp@1
+                  displayName: 'Zip Deploy to Web App'
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    appType: 'webAppLinux'
+                    appName: '$(webAppName)'
+                    package: '$(Pipeline.Workspace)/$(artifactName)/$(packageFileName)'
