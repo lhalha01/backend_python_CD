@@ -80,3 +80,24 @@ stages:
             inputs:
               PathtoPublish: '$(Build.ArtifactStagingDirectory)/$(packageFileName)'
               ArtifactName: '$(artifactName)'
+- stage: Deploy
+  displayName: 'Deploy'
+  dependsOn: Build
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'), ne(variables['Build.Reason'], 'PullRequest'))
+  jobs:
+    - deployment: DeployWebApp
+      displayName: 'Deploy to Azure App Service'
+      environment: '$(environmentName)'
+      strategy:
+          runOnce:
+            deploy:
+              steps:
+                - download: current
+                  artifact: '$(artifactName)'
+                - task: AzureWebApp@1
+                  displayName: 'Zip Deploy to Web App'
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    appType: 'webAppLinux'
+                      appName: '$(webAppName)'
+                      package: '$(Pipeline.Workspace)/$(artifactName)/$(packageFileName)'
